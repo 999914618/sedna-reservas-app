@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { initializeApp } from "firebase/app";
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "firebase/auth";
-import { getFirestore, collection, doc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp } from "firebase/firestore";
+import { createClient } from "@supabase/supabase-js";
 import {
   Calendar as CalendarIcon,
   Phone,
@@ -68,7 +68,37 @@ const ROOM_LAYOUT = {
 };
 
 const ALL_ROOMS = Object.values(ROOM_LAYOUT).flat();
-const BOOKINGS_STORAGE_KEY = "sedna_bookings";
+const SUPABASE_URL = "https://nsjafqikhuamcqutqfzr.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_J6u565U6M74qlfmVYP4cSQ_lkGUJ98O";
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const mapReservaFromDb = (row) => ({
+  ...row,
+  apt: row.room_number ?? row.apt ?? "",
+  roomType: row.room_type ?? row.roomType ?? "",
+  price: row.value ?? row.price ?? 0,
+  checkIn: row.checkIn ?? row.check_in ?? "",
+  checkOut: row.checkOut ?? row.check_out ?? "",
+  statusChangedAt: row.statusChangedAt ?? row.status_changed_at ?? null,
+  createdAtIso: row.createdAtIso ?? row.created_at_iso ?? null
+});
+const mapReservaToDb = (booking) => ({
+  name: booking.name || "",
+  cpf: booking.cpf || "",
+  phone: booking.phone || "",
+  room_number: booking.apt || booking.room_number || "",
+  room_type: booking.roomType || booking.room_type || "",
+  value: Number(booking.price ?? booking.value ?? 0),
+  checkIn: booking.checkIn || booking.check_in || "",
+  checkOut: booking.checkOut || booking.check_out || "",
+  noCheckOutInfo: Boolean(booking.noCheckOutInfo),
+  customRoomName: booking.customRoomName || "",
+  arrivalTime: booking.arrivalTime || "",
+  status: booking.status || "confirmed",
+  createdAtIso: booking.createdAtIso || new Date().toISOString(),
+  statusChangedAt: booking.statusChangedAt || new Date().toISOString(),
+  archivedAt: booking.archivedAt ?? null,
+  completedAt: booking.completedAt ?? null
+});
 
 const getMTDate = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Cuiaba", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const getMTTime = () => new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Cuiaba", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date());
@@ -84,22 +114,12 @@ const initialAuthToken = typeof window !== "undefined" ? window.__initial_auth_t
 const firebaseConfig = firebaseConfigRaw ? JSON.parse(firebaseConfigRaw) : null;
 const firebaseApp = firebaseConfig ? initializeApp(firebaseConfig) : null;
 const auth = firebaseApp ? getAuth(firebaseApp) : null;
-const db = firebaseApp ? getFirestore(firebaseApp) : null;
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [activeTab, setActiveTab] = useState("dashboard");
-  const [bookings, setBookings] = useState(() => {
-    try {
-      const stored = localStorage.getItem(BOOKINGS_STORAGE_KEY);
-      if (!stored) return [];
-      const parsed = JSON.parse(stored);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (err) {
-      console.error("Erro ao carregar reservas do localStorage", err);
-      return [];
-    }
-  });
+  const [allBookings, setAllBookings] = useState([]);
+  const [bookings, setBookings] = useState([]);
   const [messages, setMessages] = useState([]);
   const [readMessages, setReadMessages] = useState([]);
   const [roomStatuses, setRoomStatuses] = useState({});
@@ -142,38 +162,108 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  useEffect(() => {
-    if (!db || !user) return;
-    const unsubBookings = onSnapshot(collection(db, "artifacts", appId, "public", "data", "bookings"), (s) => setBookings(s.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    const unsubMessages = onSnapshot(collection(db, "artifacts", appId, "public", "data", "messages"), (s) => setMessages(s.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    const unsubReads = onSnapshot(collection(db, "artifacts", appId, "users", deviceId, "message_reads"), (s) => setReadMessages(s.docs.map((d) => d.id)));
-    const unsubRooms = onSnapshot(collection(db, "artifacts", appId, "public", "data", "room_statuses"), (s) => {
-      const map = {};
-      s.docs.forEach((d) => { map[d.id] = d.data().status || "free"; });
-      setRoomStatuses(map);
-    });
-    return () => { unsubBookings(); unsubMessages(); unsubReads(); unsubRooms(); };
-  }, [user, deviceId]);
+  const loadAllBookings = async () => {
+    const { data, error } = await supabase.from("reservas").select("*");
+    if (error) {
+      console.error("Erro ao carregar todas as reservas do Supabase", error);
+      return;
+    }
+    setAllBookings(Array.isArray(data) ? data.map(mapReservaFromDb) : []);
+  };
+
+  const loadBookingsForView = async () => {
+    let query = supabase.from("reservas").select("*");
+    if (activeTab === "dashboard" || activeTab === "all_bookings") query = query.eq("status", "confirmed");
+    if (activeTab === "checkin") query = query.eq("status", "arrived");
+    if (activeTab === "noshow") query = query.eq("status", "no_show");
+    if (activeTab === "cancelled") query = query.eq("status", "cancelled");
+    if (activeTab === "history") query = query.eq("status", "archived");
+    const { data, error } = await query;
+    if (error) {
+      console.error("Erro ao carregar reservas filtradas do Supabase", error);
+      return;
+    }
+    setBookings(Array.isArray(data) ? data.map(mapReservaFromDb) : []);
+  };
 
   useEffect(() => {
-    try {
-      localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(bookings));
-    } catch (err) {
-      console.error("Erro ao salvar reservas no localStorage", err);
-    }
-  }, [bookings]);
+    const loadMessages = async () => {
+      const { data, error } = await supabase.from("mural_recados").select("*");
+      if (error) {
+        console.error("Erro ao carregar mural de recados do Supabase", error);
+        return;
+      }
+      setMessages(Array.isArray(data) ? data : []);
+    };
+
+    loadMessages();
+    const channel = supabase
+      .channel("mural-recados-sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "mural_recados" }, () => {
+        loadMessages();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  useEffect(() => {
+    const loadRoomStatuses = async () => {
+      const { data, error } = await supabase.from("status_quartos").select("*");
+      if (error) {
+        console.error("Erro ao carregar status dos quartos do Supabase", error);
+        return;
+      }
+      const map = {};
+      (data || []).forEach((row) => {
+        const roomNumber = row.room_number ?? row.apt;
+        if (roomNumber) map[roomNumber] = row.status || "free";
+      });
+      setRoomStatuses(map);
+    };
+
+    loadRoomStatuses();
+    const channel = supabase
+      .channel("status-quartos-sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "status_quartos" }, () => {
+        loadRoomStatuses();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  useEffect(() => {
+    loadAllBookings();
+    loadBookingsForView();
+    const channel = supabase
+      .channel("reservas-sync")
+      .on("postgres_changes", { event: "*", schema: "public", table: "reservas" }, () => {
+        loadAllBookings();
+        loadBookingsForView();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [activeTab]);
 
   useEffect(() => {
     const interval = setInterval(async () => {
       const now = Date.now();
-      const due = bookings.filter((b) => AUTO_ARCHIVE_STATUS.includes(b.status) && b.statusChangedAt && now - new Date(b.statusChangedAt).getTime() >= 12 * 60 * 60 * 1000);
+      const due = allBookings.filter((b) => AUTO_ARCHIVE_STATUS.includes(b.status) && b.statusChangedAt && now - new Date(b.statusChangedAt).getTime() >= 12 * 60 * 60 * 1000);
       for (const b of due) {
-        if (!db) setBookings((prev) => prev.map((it) => (it.id === b.id ? { ...it, status: "archived", archivedAt: new Date().toISOString() } : it)));
-        else await updateDoc(doc(db, "artifacts", appId, "public", "data", "bookings", b.id), { status: "archived", archivedAt: serverTimestamp() });
+        // eslint-disable-next-line no-await-in-loop
+        await supabase.from("reservas").update({ status: "archived", archivedAt: new Date().toISOString() }).eq("id", b.id);
       }
     }, 60000);
     return () => clearInterval(interval);
-  }, [bookings]);
+  }, [allBookings]);
 
   const getRoomStatus = (apt) => roomStatuses[apt] || "free";
 
@@ -185,7 +275,7 @@ export default function App() {
       return { status: manualStatus, untilDate: null };
     }
 
-    const roomBookings = bookings.filter((b) => (b.apt || "").trim() === (apt || "").trim() && !["archived", "cancelled", "no_show"].includes(b.status));
+    const roomBookings = allBookings.filter((b) => (b.apt || "").trim() === (apt || "").trim() && !["archived", "cancelled", "no_show"].includes(b.status));
 
     const arrivedActive = roomBookings.find((b) => {
       if (b.status !== "arrived") return false;
@@ -213,7 +303,7 @@ export default function App() {
     if (!apt || !candidate.checkIn) return null;
     const startA = dateToNumber(candidate.checkIn);
     const endA = dateToNumber(candidate.checkOut || candidate.checkIn);
-    return bookings.find((b) => {
+    return allBookings.find((b) => {
       if (b.id === ignoreId) return false;
       if (b.status === "archived" || b.status === "cancelled") return false;
       if ((b.apt || "").trim() !== apt.trim()) return false;
@@ -224,8 +314,11 @@ export default function App() {
   };
 
   const updateRoomStatus = async (apt, status) => {
-    if (!db) return setRoomStatuses((prev) => ({ ...prev, [apt]: status }));
-    await setDoc(doc(db, "artifacts", appId, "public", "data", "room_statuses", apt), { status, updatedAt: serverTimestamp() });
+    const { error } = await supabase.from("status_quartos").upsert({ room_number: apt, status }, { onConflict: "room_number" });
+    if (error) {
+      console.error("Erro ao atualizar status do quarto no Supabase", error);
+      alert("Nao foi possivel atualizar o status do quarto.");
+    }
   };
 
   const createBooking = async (formData) => {
@@ -242,9 +335,18 @@ export default function App() {
       alert("⚠️ Já existe uma reserva cadastrada para este apartamento nesta data.");
       return;
     }
-    const payload = { ...formData, status: "confirmed", createdAtIso: new Date().toISOString(), statusChangedAt: new Date().toISOString() };
-    if (!db) setBookings((prev) => [...prev, { ...payload, id: crypto.randomUUID() }]);
-    else await addDoc(collection(db, "artifacts", appId, "public", "data", "bookings"), { ...payload, createdAt: serverTimestamp() });
+    const payload = mapReservaToDb({
+      ...formData,
+      status: "confirmed",
+      createdAtIso: new Date().toISOString(),
+      statusChangedAt: new Date().toISOString()
+    });
+    const { error } = await supabase.from("reservas").insert(payload);
+    if (error) {
+      console.error("Erro ao criar reserva no Supabase", error);
+      alert("Nao foi possivel salvar a reserva no Supabase.");
+      return;
+    }
     setShowNewBooking(false);
   };
 
@@ -253,17 +355,13 @@ export default function App() {
     const payload = isCheckoutToHistory
       ? { status: "archived", statusChangedAt: new Date().toISOString(), archivedAt: new Date().toISOString(), completedAt: new Date().toISOString() }
       : { status, statusChangedAt: new Date().toISOString() };
-    const current = bookings.find((b) => b.id === id);
-    if (!db) {
-      setBookings((prev) => prev.map((b) => (b.id === id ? { ...b, ...payload } : b)));
-      if (current?.apt) {
-        if (status === "arrived") setRoomStatuses((prev) => ({ ...prev, [current.apt]: "occupied" }));
-        if (status === "cancelled") setRoomStatuses((prev) => ({ ...prev, [current.apt]: "free" }));
-      if (status === "completed") setRoomStatuses((prev) => ({ ...prev, [current.apt]: "dirty" }));
-      }
+    const current = allBookings.find((b) => b.id === id);
+    const { error } = await supabase.from("reservas").update(payload).eq("id", id);
+    if (error) {
+      console.error("Erro ao atualizar reserva no Supabase", error);
+      alert("Nao foi possivel atualizar a reserva no Supabase.");
       return;
     }
-    await updateDoc(doc(db, "artifacts", appId, "public", "data", "bookings", id), payload);
     if (current?.apt) {
       if (status === "arrived") await updateRoomStatus(current.apt, "occupied");
       if (status === "cancelled") await updateRoomStatus(current.apt, "free");
@@ -272,12 +370,21 @@ export default function App() {
   };
 
   const archiveBooking = async (id) => {
-    if (!db) return setBookings((prev) => prev.map((b) => (b.id === id ? { ...b, status: "archived", archivedAt: new Date().toISOString() } : b)));
-    await updateDoc(doc(db, "artifacts", appId, "public", "data", "bookings", id), { status: "archived", archivedAt: serverTimestamp() });
+    const { error } = await supabase.from("reservas").update({ status: "archived", archivedAt: new Date().toISOString() }).eq("id", id);
+    if (error) {
+      console.error("Erro ao arquivar reserva no Supabase", error);
+      alert("Nao foi possivel arquivar a reserva no Supabase.");
+    }
   };
 
   const restoreBooking = async (id) => updateBookingStatus(id, "confirmed");
-  const deleteBooking = async (id) => (!db ? setBookings((prev) => prev.filter((b) => b.id !== id)) : deleteDoc(doc(db, "artifacts", appId, "public", "data", "bookings", id)));
+  const deleteBooking = async (id) => {
+    const { error } = await supabase.from("reservas").delete().eq("id", id);
+    if (error) {
+      console.error("Erro ao excluir reserva no Supabase", error);
+      alert("Nao foi possivel excluir a reserva no Supabase.");
+    }
+  };
 
   const deleteSelectedArchived = async () => {
     for (const id of selectedArchiveIds) {
@@ -305,28 +412,38 @@ export default function App() {
 
   const applySearch = () => setSearchTerm(searchInput.trim());
   const clearSearch = () => { setSearchInput(""); setSearchTerm(""); };
-  const markAsRead = async (msgId) => (!db ? setReadMessages((prev) => (prev.includes(msgId) ? prev : [...prev, msgId])) : setDoc(doc(db, "artifacts", appId, "users", deviceId, "message_reads", msgId), { readAt: serverTimestamp() }));
+  const markAsRead = async (msgId) => setReadMessages((prev) => (prev.includes(msgId) ? prev : [...prev, msgId]));
 
   const addMessage = async (data) => {
     if (!data?.content?.trim()) return;
     const payload = { content: data.content.trim(), type: "text", senderId: deviceId, timestamp: new Date().toISOString(), displayTime: `${getMTDate()} ${getMTTime()}`, targetType: data.targetType || "all", targetName: data.targetType === "person" ? (data.targetName || "").trim() : "" };
-    if (!db) return setMessages((prev) => [...prev, { id: crypto.randomUUID(), ...payload }]);
-    await addDoc(collection(db, "artifacts", appId, "public", "data", "messages"), payload);
+    const { error } = await supabase.from("mural_recados").insert(payload);
+    if (error) {
+      console.error("Erro ao criar recado no Supabase", error);
+      alert("Nao foi possivel criar o recado.");
+    }
   };
-  const updateMessage = async (id, updates) => (!db ? setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...updates, editedAt: new Date().toISOString() } : m))) : updateDoc(doc(db, "artifacts", appId, "public", "data", "messages", id), { ...updates, editedAt: new Date().toISOString() }));
-  const deleteMessage = async (id) => (!db ? setMessages((prev) => prev.filter((m) => m.id !== id)) : deleteDoc(doc(db, "artifacts", appId, "public", "data", "messages", id)));
+  const updateMessage = async (id, updates) => {
+    const { error } = await supabase.from("mural_recados").update({ ...updates, editedAt: new Date().toISOString() }).eq("id", id);
+    if (error) {
+      console.error("Erro ao atualizar recado no Supabase", error);
+      alert("Nao foi possivel atualizar o recado.");
+    }
+  };
+  const deleteMessage = async (id) => {
+    const { error } = await supabase.from("mural_recados").delete().eq("id", id);
+    if (error) {
+      console.error("Erro ao excluir recado no Supabase", error);
+      alert("Nao foi possivel excluir o recado.");
+    }
+  };
 
   const filteredBookings = useMemo(() => {
     return bookings.filter((b) => {
       const search = normalizeText(searchTerm);
       const matchSearch = !searchTerm || normalizeText(b.name).includes(search) || normalizeDigits(b.cpf).includes(normalizeDigits(searchTerm)) || normalizeText(b.checkIn).includes(search);
       if (filterDate && b.checkIn !== filterDate) return false;
-      if (activeTab === "dashboard") return b.status === "confirmed" && ((!filterDate && !searchTerm) ? b.checkIn === todayString : true) && matchSearch;
-      if (activeTab === "all_bookings") return b.status === "confirmed" && matchSearch;
-      if (activeTab === "checkin") return b.status === "arrived" && matchSearch;
-      if (activeTab === "noshow") return b.status === "no_show" && matchSearch;
-      if (activeTab === "cancelled") return b.status === "cancelled" && matchSearch;
-      if (activeTab === "history") return b.status === "archived" && matchSearch;
+      if (activeTab === "dashboard") return ((!filterDate && !searchTerm) ? b.checkIn === todayString : true) && matchSearch;
       return matchSearch;
     });
   }, [bookings, activeTab, searchTerm, filterDate, todayString]);

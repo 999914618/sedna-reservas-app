@@ -68,6 +68,7 @@ const ROOM_LAYOUT = {
 };
 
 const ALL_ROOMS = Object.values(ROOM_LAYOUT).flat();
+const BOOKINGS_STORAGE_KEY = "sedna_bookings";
 
 const getMTDate = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Cuiaba", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const getMTTime = () => new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Cuiaba", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date());
@@ -88,7 +89,17 @@ const db = firebaseApp ? getFirestore(firebaseApp) : null;
 export default function App() {
   const [user, setUser] = useState(null);
   const [activeTab, setActiveTab] = useState("dashboard");
-  const [bookings, setBookings] = useState([]);
+  const [bookings, setBookings] = useState(() => {
+    try {
+      const stored = localStorage.getItem(BOOKINGS_STORAGE_KEY);
+      if (!stored) return [];
+      const parsed = JSON.parse(stored);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (err) {
+      console.error("Erro ao carregar reservas do localStorage", err);
+      return [];
+    }
+  });
   const [messages, setMessages] = useState([]);
   const [readMessages, setReadMessages] = useState([]);
   const [roomStatuses, setRoomStatuses] = useState({});
@@ -143,6 +154,14 @@ export default function App() {
     });
     return () => { unsubBookings(); unsubMessages(); unsubReads(); unsubRooms(); };
   }, [user, deviceId]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(bookings));
+    } catch (err) {
+      console.error("Erro ao salvar reservas no localStorage", err);
+    }
+  }, [bookings]);
 
   useEffect(() => {
     const interval = setInterval(async () => {
